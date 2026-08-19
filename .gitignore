@@ -1,33 +1,31 @@
+node_modules/
+dist/
+coverage/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+
+# python
 __pycache__/
 *.py[cod]
-
-# Virtual environments
 .venv/
 venv/
-env/
-.env/
-.env 
-
-# Python tooling
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 
-# Build artifacts
-build/
-dist/
-*.egg-info/
-
-# Editor/OS noise
-.DS_Store
-.idea/
-.vscode/
-*.swp
-.ipynb_checkpoints/
-
-# Generated data
+# generated harness artifacts
 data/baseline_outputs.jsonl
 data/eval_report.json
 data/determinism_report.json
+.cache/
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store

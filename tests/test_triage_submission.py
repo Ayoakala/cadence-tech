@@ -1,41 +1,55 @@
+"""Tests for the Python bridge into the TypeScript triage implementation.
+
+The starter's version of this file asserted on the baseline's OpenAI wiring —
+that `triage_submission` called `client.responses.create` once, with a particular
+`instructions` string and `json_schema` format. That implementation is gone: the
+solution is deterministic TypeScript in `src/`, and `core.py: triage_submission`
+now delegates to it over a subprocess. Those assertions would have been testing
+code that no longer exists, so they are replaced with tests of the contract that
+actually holds now.
+
+The rule-level behaviour is covered by the vitest suite (`bun run test`), which
+includes a golden test over all 50 dataset cases. What is left to verify on this
+side is the bridge itself: that the subprocess round-trip produces a valid
+`TriageOutput`, that it is stable, and that failures surface as exceptions rather
+than silently-null rows.
+
+These tests shell out to Node, so they need `bun install` (and ideally
+`bun run build`) to have been run first.
+"""
+
 from __future__ import annotations
 
 import json
-import sys
-from types import SimpleNamespace
-from unittest.mock import Mock
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from core import (
-    BASELINE_SYSTEM_PROMPT,
     PatientSubmission,
+    PreparedPatientCase,
     TriageOutput,
-    triage_output_json_schema,
     triage_submission,
 )
 
+ROOT = Path(__file__).resolve().parent.parent
+DATASET = ROOT / "data" / "patients_sample_50.jsonl"
 
-@pytest.fixture
-def openai_client(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    client = Mock()
-    client.responses.create.return_value = SimpleNamespace(
-        output_text=json.dumps(
-            {
-                "decision": "READY",
-                "issues": [],
-                "explanation": "All required criteria are satisfied.",
-            }
-        ),
-    )
 
-    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=lambda: client))
-    return client
+@pytest.fixture(scope="module")
+def dataset() -> list[PreparedPatientCase]:
+    rows = [
+        json.loads(line)
+        for line in DATASET.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return [PreparedPatientCase.model_validate(row) for row in rows]
 
 
 @pytest.fixture
 def submission_payload() -> dict[str, object]:
+    """A submission that satisfies every rule, so a clean pass is READY."""
     return {
         "patient": {"id": "patient-1"},
         "procedure": {
@@ -49,7 +63,8 @@ def submission_payload() -> dict[str, object]:
                 "systolic": 120,
                 "diastolic": 80,
                 "date": "2026-01-25",
-            }
+            },
+            {"type": "temperature", "value_f": 98.6, "date": "2026-01-25"},
         ],
         "labs": [
             {
@@ -63,12 +78,12 @@ def submission_payload() -> dict[str, object]:
         "conditions": [],
         "documents": [
             {
-                "type": "history_and_physical",
+                "type": "History and Physical",
                 "date": "2026-01-20",
                 "text": "History and physical completed.",
             },
             {
-                "type": "surgical_consent",
+                "type": "Surgical Consent",
                 "date": "2026-01-22",
                 "text": "Signed surgical consent.",
             },
@@ -76,67 +91,67 @@ def submission_payload() -> dict[str, object]:
     }
 
 
-def test_triage_submission_returns_structured_output(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    output = triage_submission(submission_payload, model="test-model")
+def test_bridge_returns_structured_output(submission_payload: dict[str, object]) -> None:
+    output = triage_submission(submission_payload, model="unused")
 
     assert isinstance(output, TriageOutput)
     assert output.decision == "READY"
     assert output.issues == []
-    assert output.explanation == "All required criteria are satisfied."
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    assert call["model"] == "test-model"
-    assert call["instructions"] == BASELINE_SYSTEM_PROMPT
-
-    text_config = call["text"]
-    assert isinstance(text_config, dict)
-    response_format = text_config["format"]
-    assert isinstance(response_format, dict)
-    assert response_format["type"] == "json_schema"
-    assert response_format["name"] == "preop_triage_output"
-    assert response_format["schema"] == triage_output_json_schema()
-    assert response_format["strict"] is False
+    assert output.explanation
 
 
-def test_triage_submission_builds_prompt_from_validated_submission(
-    openai_client: Mock,
+def test_bridge_accepts_a_validated_submission(
     submission_payload: dict[str, object],
 ) -> None:
     submission = PatientSubmission.model_validate(submission_payload)
-
-    triage_submission(submission, model="test-model")
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    message = call["input"][0]
-    content = message["content"][0]
-    prompt = content["text"]
-
-    assert message["type"] == "message"
-    assert message["role"] == "user"
-    assert content["type"] == "input_text"
-    assert json.loads(prompt.split("Submission JSON:\n", 1)[1]) == submission.model_dump()
+    output = triage_submission(submission, model="unused")
+    assert output.decision == "READY"
 
 
-def test_triage_submission_rejects_invalid_model_json(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
+def test_bridge_is_deterministic(submission_payload: dict[str, object]) -> None:
+    """Repeated calls must be byte-identical.
+
+    This is the property `make determinism` measures across ten runs; asserting
+    it here catches a regression without spending a full harness run.
+    """
+    first = triage_submission(submission_payload, model="unused").model_dump()
+    second = triage_submission(submission_payload, model="unused").model_dump()
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_bridge_reproduces_the_worked_example(
+    dataset: list[PreparedPatientCase],
 ) -> None:
-    openai_client.responses.create.return_value = SimpleNamespace(
-        output_text=json.dumps(
-            {
-                "decision": "MAYBE",
-                "issues": [],
-                "explanation": "Not a valid triage decision.",
-            }
-        )
+    """case_00000 is the example worked through in the exercise brief."""
+    case = next(c for c in dataset if c.case_id == "case_00000")
+    output = triage_submission(case.submission.model_dump(), model="unused")
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert {issue.category for issue in output.issues} == {
+        "MISSING_REQUIRED_DATA",
+        "ANTICOAGULATION_MANAGEMENT",
+    }
+
+    by_category = {issue.category: issue for issue in output.issues}
+    assert (
+        by_category["MISSING_REQUIRED_DATA"].evidence.source
+        == "procedure.procedure_date"
     )
+    # The brief cites documents[4] for this case, which fixes zero-based indexing.
+    assert by_category["ANTICOAGULATION_MANAGEMENT"].evidence.source == "documents[4]"
 
-    with pytest.raises(ValidationError):
-        triage_submission(submission_payload, model="test-model")
 
-    assert openai_client.responses.create.call_count == 1
+def test_bridge_surfaces_invalid_input_as_an_exception() -> None:
+    """A malformed submission must raise, not return a plausible-looking output.
+
+    `run_baseline.py` catches exceptions per row and records them in the `error`
+    field, so the scorer counts the row as failed. Swallowing the error inside
+    the bridge would instead report a confident wrong answer.
+
+    Structurally invalid input is rejected by pydantic on this side of the bridge
+    (a `ValidationError`) before the subprocess is spawned; a failure inside the
+    child surfaces as a `RuntimeError`. Either is acceptable — what matters is
+    that nothing is returned.
+    """
+    with pytest.raises((ValidationError, RuntimeError)):
+        triage_submission({"procedure": "not an object"}, model="unused")

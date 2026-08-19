@@ -1,0 +1,36 @@
+{
+  "name": "cadence-preop-triage",
+  "version": "0.1.0",
+  "description": "Pre-operative scheduling triage: evaluates a patient submission package against the Cadence Surgical Center scheduling policy",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/init.ts",
+    "start": "node dist/init.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "gts lint",
+    "lint:fix": "gts fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "triage": "tsx src/init.ts",
+    "triage:one": "tsx src/bridge.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "openai": "^4.77.0",
+    "pino": "^9.5.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "gts": "^5.3.1",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
